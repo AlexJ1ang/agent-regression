@@ -1,28 +1,28 @@
-# SSE Agent Bench
+# Agent Regression
 
-一个面向 **SSE 流式 LLM Agent 服务**的通用黑盒测试框架，把功能评测、性能压测、回归比较和 CI 质量门禁放在同一套命令行工具中。
+在修改 Agent 的提示词或流程后，重新运行一组固定问题，检查原本正常的回答和工具调用是否出现退步。
 
-框架不依赖具体 Agent SDK、编排框架或业务领域。你只需要用 YAML 描述自己的 HTTP 请求结构、SSE 事件格式和测试期望，无需修改 SSE Agent Bench 源码。
+当前版本通过 HTTP/SSE 接口接入 Agent。用 YAML 描述请求、返回事件和每条问题的预期，再用命令运行测试、保存结果并与上次运行比较。
 
 > 仓库中的服务地址、城市、工具名和用例均为虚构示例，不包含真实客户或设备数据。
 
 ## 能做什么
 
-- 功能评测：意图、工具调用、关键词、正则和参考答案数值校验
-- 开放问题评分：可选 LLM-as-Judge、多维评分和一致性检查
-- 性能压测：并发、持续时间、吞吐、TTFT、延迟分位数和流中断率
-- 稳定性分析：重复采样、flaky 检测和 Wilson 置信区间
-- 回归分析：基线比较、McNemar/paired-t 显著性检验
-- 可追溯性：保存完整 trace，并对回答、工具调用和耗时进行回放 diff
-- CI 门禁：按照最低分、通过率和最大回归数阻止不合格发布
+- 重新运行已有问题，检查回答是否满足预期、是否调用了需要的工具。
+- 保存每次回答、工具调用和响应时间，比较修改前后的测试结果。
+- 单独重跑失败问题，查看新旧回答、工具调用和耗时的差异。
+- 生成 HTML 和 JSON 报告，保留每次运行的原始记录。
+- 按项目要求设置通过条件，供发布前检查使用。
+
+重复运行、统计分析、模型辅助评分和并发压测可按需启用。
 
 ## 安装
 
 需要 Python 3.11、3.12 或 3.13。
 
 ```bash
-git clone https://github.com/AlexJ1ang/sse-agent-bench.git
-cd sse-agent-bench
+git clone https://github.com/AlexJ1ang/agent-regression.git
+cd agent-regression
 python -m venv .venv
 ```
 
@@ -103,7 +103,7 @@ target:
 ```yaml
 request_adapter:
   extra_headers:
-    X-Client: "sse-agent-bench"
+    X-Client: "agent-regression"
 ```
 
 认证头请只放在被忽略的 `config.local.yaml` 中，不要提交真实令牌。
@@ -192,7 +192,7 @@ cases:
 ### 5. 运行评测
 
 ```bash
-sse-agent-bench eval \
+agent-regression eval \
   --config config.local.yaml \
   --suite examples/suites/smoke.yaml
 ```
@@ -229,7 +229,7 @@ eval:
 
 ```bash
 export HARNESS_JUDGE_API_KEY="your-key"
-sse-agent-bench eval -c config.local.yaml -s suites/regression.yaml
+agent-regression eval -c config.local.yaml -s suites/regression.yaml
 ```
 
 PowerShell 使用 `$env:HARNESS_JUDGE_API_KEY = "your-key"`。Judge API 需兼容 OpenAI Chat Completions 接口。
@@ -237,7 +237,7 @@ PowerShell 使用 `$env:HARNESS_JUDGE_API_KEY = "your-key"`。Judge API 需兼�
 ## 性能压测
 
 ```bash
-sse-agent-bench load \
+agent-regression load \
   --config config.local.yaml \
   --suite examples/suites/smoke.yaml \
   --concurrency 10 \
@@ -250,23 +250,23 @@ sse-agent-bench load \
 
 ```bash
 # 查看已有基线和 trace run
-sse-agent-bench list
+agent-regression list
 
 # 回放单个用例并生成回答、工具和耗时 diff
-sse-agent-bench replay -c config.local.yaml -s suites/regression.yaml \
+agent-regression replay -c config.local.yaml -s suites/regression.yaml \
   --run-id <run_id> --case-id <case_id>
 
 # 从 JSON 重新生成 HTML
-sse-agent-bench report -i harness_output/report_<run_id>.json
+agent-regression report -i harness_output/report_<run_id>.json
 
 # 预览将被清理的旧 trace；加 --yes 才实际删除
-sse-agent-bench prune --keep 20
+agent-regression prune --keep 20
 ```
 
 ## CI 质量门禁
 
 ```bash
-sse-agent-bench eval \
+agent-regression eval \
   -c config.local.yaml \
   -s suites/regression.yaml \
   --gate \

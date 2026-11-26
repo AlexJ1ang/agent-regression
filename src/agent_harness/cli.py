@@ -1,9 +1,9 @@
-"""SSE Agent Bench CLI 入口。
+"""Agent Regression CLI 入口。
 
 用法：
-    sse-agent-bench eval --config config.yaml --suite cases.yaml
-    sse-agent-bench load --config config.yaml --suite cases.yaml
-    sse-agent-bench report --input harness_output/report_xxx.json --format html
+    agent-regression eval --config config.yaml --suite cases.yaml
+    agent-regression load --config config.yaml --suite cases.yaml
+    agent-regression report --input harness_output/report_xxx.json --format html
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ STRATEGY_CHOICES = list(STRATEGIES)
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="sse-agent-bench",
-        description="SSE 流式 LLM Agent 的评测、回归、回放与性能压测工具",
+        prog="agent-regression",
+        description="重新运行 Agent 测试问题，比较回答、工具调用与耗时的变化",
     )
     parser.add_argument("--version", action="version", version="%(prog)s 1.0.0")
     parser.add_argument(

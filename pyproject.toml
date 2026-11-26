@@ -3,14 +3,14 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sse-agent-bench"
+name = "agent-regression"
 version = "1.0.0"
-description = "Configurable evaluation, regression, replay, and load testing for SSE-based LLM agents"
+description = "Regression testing and result comparison for HTTP/SSE-based AI agents"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11,<3.14"
 authors = [
-    { name = "SSE Agent Bench contributors" },
+    { name = "Agent Regression contributors" },
 ]
 keywords = ["llm", "agent", "evaluation", "testing", "sse", "benchmark"]
 classifiers = [
@@ -37,12 +37,12 @@ dev = [
 ]
 
 [project.scripts]
-sse-agent-bench = "agent_harness.cli:main"
+agent-regression = "agent_harness.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/AlexJ1ang/sse-agent-bench#readme"
-Issues = "https://github.com/AlexJ1ang/sse-agent-bench/issues"
-Source = "https://github.com/AlexJ1ang/sse-agent-bench"
+Documentation = "https://github.com/AlexJ1ang/agent-regression#readme"
+Issues = "https://github.com/AlexJ1ang/agent-regression/issues"
+Source = "https://github.com/AlexJ1ang/agent-regression"
 
 [tool.setuptools.packages.find]
 where = ["src"]
