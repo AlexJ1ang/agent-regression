@@ -1,7 +1,8 @@
 """事实一致性评分器（通用版）。
 
 校验 Agent 的回答是否满足用例 expectations 中声明的确定性期望：
-关键词存在、正则匹配、参考答案中的数值覆盖。
+关键词存在和正则匹配。参考答案需由独立的业务检查或 Judge 核验，
+数字恰好出现不能证明实体、单位和结论正确。
 不含任何领域特定的硬编码规则。
 """
 
@@ -10,8 +11,6 @@ from __future__ import annotations
 import re
 
 from agent_harness.models import DimensionScore, ScorerType, SSEStreamResult, TestCase
-
-_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 class FactScorer:
@@ -57,25 +56,20 @@ class FactScorer:
             else:
                 issues.append(f"回答未匹配正则: {failed_patterns[:3]}")
 
-        # 3. 参考答案数值覆盖校验
-        if exp.reference_answer:
-            checks_total += 1
-            ref_numbers = set(_NUMBER_PATTERN.findall(exp.reference_answer))
-            answer_numbers = set(_NUMBER_PATTERN.findall(answer))
-            missing = ref_numbers - answer_numbers
-            if not missing or len(missing) <= len(ref_numbers) * 0.5:
-                checks_passed += 1
-            else:
-                issues.append(
-                    f"回答缺少参考答案中的关键数值: {sorted(missing)[:5]}"
-                )
+        needs_review = bool(exp.reference_answer)
+        review_detail = (
+            "；参考答案尚需业务检查或独立 Judge 核验，未使用数字集合覆盖判定正确"
+            if needs_review else ""
+        )
 
         if checks_total == 0:
             return DimensionScore(
                 scorer=ScorerType.FACT,
-                score=1.0,
+                score=0.0,
+                passed=False,
                 skipped=True,
-                details="用例未声明事实期望，跳过",
+                needs_review=needs_review,
+                details="未声明可执行的关键词或正则检查，跳过" + review_detail,
             )
 
         score = round(checks_passed / checks_total, 4)
@@ -83,6 +77,7 @@ class FactScorer:
             scorer=ScorerType.FACT,
             score=score,
             passed=not issues,
-            details=f"通过 {checks_passed}/{checks_total} 项事实校验",
+            needs_review=needs_review,
+            details=f"通过 {checks_passed}/{checks_total} 项确定性检查" + review_detail,
             issues=issues,
         )

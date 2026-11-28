@@ -206,13 +206,14 @@ td {{ padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }}
         for cr in cases:
             case = cr.case
             eval_score = cr.eval_score
-            status = "PASS" if cr.success and (eval_score and eval_score.overall_passed) else "FAIL"
-            status_class = "pass" if status == "PASS" else "fail"
+            status = (eval_score.status or "review").upper() if eval_score else ("REVIEW" if cr.success else "ERROR")
+            status_class = "pass" if status == "PASSED" else ("fail" if status == "FAILED" else "review")
 
             dims = ""
             if eval_score:
                 for d in eval_score.dimensions:
-                    dims += f'<span class="dim">{d.scorer.value}: {d.score:.2f}</span> '
+                    label = "skipped" if d.skipped else ("review" if d.needs_review else f"{d.score:.2f}")
+                    dims += f'<span class="dim">{d.scorer.value}: {label}</span> '
 
             latency_str = ""
             if cr.latency.request_total_ms:
@@ -257,6 +258,7 @@ td {{ padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }}
         td {{ padding: 12px; border-bottom: 1px solid #eee; font-size: 13px; }}
         tr.pass {{ background: #f0fdf4; }}
         tr.fail {{ background: #fef2f2; }}
+        tr.review {{ background: #fffbeb; }}
         .dim {{ display: inline-block; background: #e0e7ff; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 4px; }}
         .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 4px; font-weight: bold; }}
         .badge.flaky {{ background: #fef3c7; color: #92400e; }}
@@ -286,7 +288,12 @@ td {{ padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }}
         <div class="card">
             <h3>Pass Rate</h3>
             <div class="value">{summary.get('eval_pass_rate', summary.get('success_rate', 0)):.1%}</div>
+            <div class="value sub">Passed / (Passed + Failed); review and error excluded</div>
             {"<div class='value sub'>Wilson CI: [{:.1%}–{:.1%}]</div>".format(*summary.get('eval_pass_rate_ci', [0, 0])) if 'eval_pass_rate_ci' in summary else ""}
+        </div>
+        <div class="card">
+            <h3>Review / Execution Error</h3>
+            <div class="value">{summary.get('eval_review', 0)} / {summary.get('eval_error', 0)}</div>
         </div>
         <div class="card">
             <h3>Avg Score</h3>

@@ -1,0 +1,77 @@
+schema_version: 2
+id: business-task-demo
+tasks:
+  - id: energy-context
+    goal: Switch device and month while preserving the other query conditions.
+    context:
+      user_id: fictional-owner
+    turns:
+      - message: 查一下 A 设备 2026-09 的油耗
+        checks:
+          - name: September query uses A
+            kind: tool_call
+            tool: query_energy
+            arguments: {device_id: A, month: '2026-09'}
+          - name: A September liters
+            kind: answer_json
+            path: liters
+            expected: 150
+      - message: 换成 B 设备呢
+        checks:
+          - name: Device changes but month stays
+            kind: tool_call
+            tool: query_energy
+            arguments: {device_id: B, month: '2026-09'}
+          - name: B September liters
+            kind: answer_json
+            path: liters
+            expected: 300
+      - message: 2026-08 呢
+        checks:
+          - name: Month changes but device stays
+            kind: tool_call
+            tool: query_energy
+            arguments: {device_id: B, month: '2026-08'}
+          - name: B August liters
+            kind: answer_json
+            path: liters
+            expected: 200
+  - id: work-order-state
+    goal: Create a work order only after confirmation and verify persisted fields.
+    context:
+      user_id: fictional-owner
+    turns:
+      - message: 给 A 设备创建巡检工单
+        checks:
+          - name: No creation before confirmation
+            kind: tool_not_called
+            tool: create_work_order
+          - name: No persisted order before confirmation
+            kind: state
+            path: work_orders
+            expected: []
+      - message: 优先级 high，确认创建
+        checks:
+          - name: Create with confirmed values
+            kind: tool_call
+            tool: create_work_order
+            arguments: {device_id: A, priority: high}
+          - name: Persisted priority
+            kind: state
+            path: work_orders.0.priority
+            expected: high
+      - message: 这张工单的状态是什么
+        checks:
+          - name: Read actual work order
+            kind: tool_call
+            tool: get_work_order
+            arguments: {order_id: W-1}
+          - name: Returned status
+            kind: answer_json
+            path: status
+            expected: open
+    checks:
+      - name: Final persisted device
+        kind: state
+        path: work_orders.0.device_id
+        expected: A

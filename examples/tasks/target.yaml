@@ -1,0 +1,7 @@
+# Local test double; put real authentication values in environment variables.
+url: http://127.0.0.1:8765/chat
+state_url: http://127.0.0.1:8765/state/{conversation_id}
+timeout_seconds: 10
+revision: fictional-demo-v1
+# headers_env:
+#   Authorization: AGENT_AUTHORIZATION

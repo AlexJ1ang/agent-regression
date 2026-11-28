@@ -15,6 +15,7 @@ from agent_harness.core.trace_store import (
 from agent_harness.models import (
     CaseResult,
     EvalScore,
+    RepeatResult,
     RunResult,
     SSEStreamResult,
     StageTiming,
@@ -60,6 +61,20 @@ def test_save_and_load_roundtrip(tmp_path):
     assert trace["payload"]["query"] == "q"
     assert trace["stream"]["tool_calls"][0]["name"] == "search"
     assert trace["stream"]["stage_timings"][0]["stage"] == "plan"
+
+
+def test_later_repeat_retains_complete_failure_evidence(tmp_path):
+    result = _make_case_result("c1", "initial answer")
+    result.repeats = [RepeatResult(
+        attempt=2, success=True, status="failed", answer_preview="short preview",
+        stream=SSEStreamResult(answer_parts=["complete answer beyond preview"], tool_calls=[
+            ToolCallRecord(name="lookup", arguments={"device": "wrong"}),
+        ]),
+    )]
+    save_run_traces(RunResult(run_id="r", mode="eval", case_results=[result]), tmp_path)
+    trace = load_trace(tmp_path, "r", "c1")
+    assert trace["repeats"][0]["stream"]["full_answer"] == "complete answer beyond preview"
+    assert trace["repeats"][0]["stream"]["tool_calls"][0]["arguments"]["device"] == "wrong"
 
 
 def test_list_run_ids_and_case_ids(tmp_path):

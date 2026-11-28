@@ -16,6 +16,37 @@
 
 重复运行、统计分析、模型辅助评分和并发压测可按需启用。
 
+## 固定多轮业务任务（试用版）
+
+`task` 命令按顺序运行一项任务的多轮消息，使用服务返回的会话 ID 继续交互。
+每轮可检查工具参数、结构化回答和独立读取的测试环境状态。缺少证据会标为
+`review`，调用异常标为 `error`；两者都不会被当作通过。
+
+先启动本地演示服务（无需模型或 API Key）：
+
+```bash
+python examples/task_demo.py
+```
+
+在另一个终端运行：
+
+```bash
+agent-regression task --suite examples/tasks/suite.yaml \
+  --target examples/tasks/target.yaml --output harness_output/task-demo
+```
+
+打开输出目录的 `report.html` 查看每轮对话、工具参数、检查依据和耗时；
+`run.json` 保存完整记录。示例涵盖设备/月度查询和确认后创建工单，两组各三轮。
+它们是用于验证框架的确定性测试替身，不代表真实模型效果。
+
+将服务改为 `python examples/task_demo.py --fault wrong-device`（先停止旧服务），
+再选择新的输出目录执行，可以验证错误设备查询能否被识别。另有 `wrong-month`
+和 `no-tools` 两种注入模式，后者应进入待核验。
+
+`--resume` 跳过已完成任务，未完成任务从新会话开始；`--rejudge` 使用已保存的
+响应重新检查，不调用 Agent。重新检查允许修改检查条件，但不允许改变原执行输入或目标。
+详细接入、状态含义和限制见 [任务测试说明](docs/task-testing.md)。
+
 ## 安装
 
 需要 Python 3.11、3.12 或 3.13。
@@ -184,7 +215,7 @@ cases:
 | `expected_tools` | 检查工具是否被调用，不要求调用顺序 |
 | `expected_keywords` | 检查最终回答是否包含关键词 |
 | `expected_patterns` | 用正则检查最终回答 |
-| `reference_answer` | 检查参考答案中的数值是否被回答覆盖，也供 Judge 参考 |
+| `reference_answer` | 供 Judge 或业务检查核对；仅凭数值出现不会判定正确 |
 | `is_open_ended` | 为 `true` 时启用 LLM-as-Judge |
 
 测试集支持 YAML、JSON 和 CSV。业务数据应使用虚构值，真实回归用例请放在私有仓库或被 Git 忽略的文件中。

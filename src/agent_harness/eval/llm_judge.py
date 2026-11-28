@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -116,37 +117,37 @@ DIMENSION_WEIGHTS = {
 
 
 class JudgeCache:
-    """Judge 评分结果缓存，按 (用例ID + 回答hash + prompt版本) 去重。"""
+    """Cache raw judge results by the complete request, isolated from legacy keys."""
 
     def __init__(self, cache_dir: Path) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _cache_key(self, case_id: str, answer: str, prompt_version: str) -> str:
-        content = f"{case_id}:{answer}:{prompt_version}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    def _cache_key(self, identity: dict[str, Any]) -> str:
+        content = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        # Old case-id/answer-only cache entries must never certify a new request.
+        return "request-v2-" + hashlib.sha256(content.encode()).hexdigest()
 
     def get(
-        self, case_id: str, answer: str, prompt_version: str = "v1"
+        self, identity: dict[str, Any],
     ) -> dict[str, Any] | None:
-        key = self._cache_key(case_id, answer, prompt_version)
+        key = self._cache_key(identity)
         path = self.cache_dir / f"{key}.json"
         if not path.exists():
             return None
         try:
             with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
+                value = json.load(f)
+                return value if isinstance(value, dict) else None
         except (json.JSONDecodeError, OSError):
             return None
 
     def put(
         self,
-        case_id: str,
-        answer: str,
+        identity: dict[str, Any],
         result: dict[str, Any],
-        prompt_version: str = "v1",
     ) -> None:
-        key = self._cache_key(case_id, answer, prompt_version)
+        key = self._cache_key(identity)
         path = self.cache_dir / f"{key}.json"
         with path.open("w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
@@ -181,6 +182,7 @@ class LLMJudge:
                 scorer=ScorerType.LLM_JUDGE,
                 score=0.0,
                 max_score=5.0,
+                skipped=True,
                 details="LLM Judge 已禁用",
             )
 
@@ -219,11 +221,20 @@ class LLMJudge:
                 score=0.0,
                 max_score=5.0,
                 passed=False,
+                skipped=True,
+                needs_review=True,
                 details="LLM Judge 调用失败",
                 issues=["Judge 调用失败"],
             )
 
-        dimension_score = self._parse_judge_result(judge_result)
+        try:
+            dimension_score = self._parse_judge_result(judge_result)
+        except (ValueError, TypeError, AttributeError):
+            return DimensionScore(
+                scorer=ScorerType.LLM_JUDGE, score=0, max_score=5,
+                passed=False, skipped=True, needs_review=True,
+                details="Judge 返回的评分结构或范围无效，需要复核",
+            )
 
         # ── 自一致性校验 ──
         if self.config.consistency_check:
@@ -234,7 +245,11 @@ class LLMJudge:
             )
             if variant_result is not None:
                 primary_total = self._weighted_total(judge_result)
-                variant_total = self._weighted_total(variant_result)
+                try:
+                    variant_total = self._weighted_total(variant_result)
+                except (ValueError, TypeError, AttributeError):
+                    dimension_score.needs_review = True
+                    return dimension_score
                 diff = abs(primary_total - variant_total)
                 if diff > self.config.consistency_threshold:
                     dimension_score.low_confidence = True
@@ -254,31 +269,74 @@ class LLMJudge:
         prompt_version: str,
         client: httpx.AsyncClient | None = None,
     ) -> dict[str, Any] | None:
-        """带缓存的 Judge 调用（缓存 key 含 prompt 版本号）。"""
+        """Bind cached judgments to the exact prompts and model request settings."""
+        identity = {
+            "case_id": case_id,
+            "answer": answer,
+            "prompt_version": prompt_version,
+            "url": f"{self.config.api_base}{self.config.chat_path}",
+            "request": self._request_payload(system_prompt, user_prompt),
+        }
         if self.cache:
-            cached = self.cache.get(case_id, answer, prompt_version)
-            if cached:
+            cached = self.cache.get(identity)
+            if cached and self._valid_judgment(cached):
                 return cached
 
         result = await self._call_judge(system_prompt, user_prompt, client)
-        if result is not None and self.cache:
-            self.cache.put(case_id, answer, result, prompt_version)
+        if result is not None and self.cache and self._valid_judgment(result):
+            self.cache.put(identity, result)
         return result
+
+    def _valid_judgment(self, result: dict[str, Any]) -> bool:
+        try:
+            self._parse_judge_result(result)
+        except (ValueError, TypeError, AttributeError):
+            return False
+        return True
+
+    def _request_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        """Share the request definition so new output parameters also affect caching."""
+        return {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "stream": False,
+        }
 
     @staticmethod
     def _weighted_total(result: dict[str, Any]) -> float:
         """从 judge 原始 JSON 中取加权总分（缺失则按维度权重计算）。"""
-        total = result.get("weighted_total", 0.0)
-        if total:
-            return float(total)
+        if "weighted_total" in result:
+            value = result["weighted_total"]
+            if isinstance(value, bool):
+                raise ValueError("Judge score must be numeric")
+            value = float(value)
+            if not math.isfinite(value) or not 0 <= value <= 5:
+                raise ValueError("Judge score must be finite and between 0 and 5")
+            return value
         dimensions = result.get("dimensions", {})
+        if not isinstance(dimensions, dict) or not all(name in dimensions for name in DIMENSION_WEIGHTS):
+            raise ValueError("Judge must return a total or all rubric scores")
         total = 0.0
         weight_sum = 0.0
         for dim_name, weight in DIMENSION_WEIGHTS.items():
             dim_data = dimensions.get(dim_name, {})
-            total += dim_data.get("score", 0) * weight
+            score = dim_data.get("score")
+            if isinstance(score, bool):
+                raise ValueError("Judge score must be numeric")
+            numeric = float(score)
+            if not math.isfinite(numeric) or not 0 <= numeric <= 5:
+                raise ValueError("Judge rubric score must be between 0 and 5")
+            total += numeric * weight
             weight_sum += weight
-        return total / max(weight_sum, 0.01)
+        value = total / max(weight_sum, 0.01)
+        if not math.isfinite(value) or not 0 <= value <= 5:
+            raise ValueError("Judge score must be finite and between 0 and 5")
+        return value
 
     async def _call_judge(
         self,
@@ -295,16 +353,7 @@ class LLMJudge:
         try:
             url = f"{self.config.api_base}{self.config.chat_path}"
             headers = {"Authorization": f"Bearer {self.config.api_key}"}
-            payload = {
-                "model": self.config.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
-                "stream": False,
-            }
+            payload = self._request_payload(system_prompt, user_prompt)
 
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
@@ -373,8 +422,6 @@ class LLMJudge:
         weighted_total = self._weighted_total(result)
         weighted_total = round(weighted_total, 2)
 
-        normalized_score = round(weighted_total / 5.0, 4)
-
         issues: list[str] = []
         for dim_name, dim_data in dimensions.items():
             comment = dim_data.get("comment", "")
@@ -396,7 +443,7 @@ class LLMJudge:
 
         return DimensionScore(
             scorer=ScorerType.LLM_JUDGE,
-            score=normalized_score,
+            score=weighted_total,
             max_score=5.0,
             passed=weighted_total >= self.config.pass_threshold,
             details=" | ".join(details_parts),

@@ -50,7 +50,7 @@ class ToolScorer:
         return DimensionScore(
             scorer=ScorerType.TOOL,
             score=score,
-            passed=not missing,
+            passed=not issues,
             details=f"期望: {sorted(expected_set)}, 实际: {sorted(actual_set)}",
             issues=issues,
         )
