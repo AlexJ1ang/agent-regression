@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import runpy
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,7 +10,8 @@ import pytest
 from agent_harness.tasks.adapters import HttpJsonAdapter, TargetConfig
 from agent_harness.tasks.loader import load_task_suite
 from agent_harness.tasks.runner import run_suite
-from examples.task_demo import DemoService
+
+DemoService = runpy.run_path(str(Path(__file__).parents[1] / "examples/task_demo.py"))["DemoService"]
 
 
 @pytest.mark.asyncio
@@ -81,7 +84,6 @@ async def test_full_demo_tasks_detect_injected_faults(tmp_path, fault, expected)
             data = service.state(request.url.path.removeprefix("/state/"))
         return httpx.Response(200, json=data)
 
-    from pathlib import Path
     suite = load_task_suite(Path(__file__).parents[1] / "examples/tasks/suite.yaml")
     target = TargetConfig(url="https://example.test/chat", state_url="https://example.test/state/{conversation_id}")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
