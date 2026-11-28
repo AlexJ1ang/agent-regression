@@ -21,6 +21,7 @@ from agent_harness.models import (
     CaseResult,
     DimensionScore,
     EvalScore,
+    EvalStatus,
     RunResult,
     ScorerType,
     SSEStreamResult,
@@ -66,6 +67,14 @@ class EvalPipeline:
         judge_client: httpx.AsyncClient,
     ) -> EvalScore:
         """对单条用例进行多维度评分（基于代表 stream）。"""
+        if not case_result.success or case_result.error:
+            return EvalScore(
+                case_id=case_result.case.id,
+                overall_passed=False,
+                status="error",
+                latency=case_result.latency,
+                error=case_result.error or "请求未成功完成",
+            )
         eval_score = await self._score_stream(
             case_result.case, case_result.stream, judge_client
         )
@@ -84,6 +93,13 @@ class EvalPipeline:
         judge_client: httpx.AsyncClient,
     ) -> EvalScore:
         """对（case, stream）组合进行多维度评分。"""
+        if stream.stream_interrupted or stream.error_events:
+            return EvalScore(
+                case_id=case.id,
+                overall_passed=False,
+                status="error",
+                error="；".join(stream.error_events) or "stream interrupted",
+            )
         dimensions: list[DimensionScore] = []
 
         if ScorerType.INTENT.value in self.enabled:
@@ -104,13 +120,31 @@ class EvalPipeline:
             dimensions.append(judge_score)
 
         overall = self._compute_overall_score(dimensions)
-        all_passed = all(d.passed for d in dimensions)
+        active = [d for d in dimensions if not d.skipped]
+        judged = any(
+            d.scorer == ScorerType.LLM_JUDGE
+            and not d.skipped and not d.needs_review and not d.low_confidence
+            for d in dimensions
+        )
+        unresolved = any(
+            (d.needs_review and not (d.scorer == ScorerType.FACT and judged))
+            or d.low_confidence
+            for d in dimensions
+        )
+        status: EvalStatus
+        if any(not d.passed for d in active):
+            status = "failed"
+        elif not active or unresolved:
+            status = "review"
+        else:
+            status = "passed"
 
         return EvalScore(
             case_id=case.id,
             dimensions=dimensions,
             overall_score=overall,
-            overall_passed=all_passed,
+            overall_passed=status == "passed",
+            status=status,
         )
 
     async def _score_repeats(
@@ -126,31 +160,54 @@ class EvalPipeline:
         primary_score = case_result.eval_score
         scores: list[float] = []
         passes: list[bool] = []
-        evaluated: list[tuple[float, bool]] = []
+        outcomes: list[EvalScore] = []
 
         for repeat in case_result.repeats:
             if repeat.attempt == 1:
                 # 首次执行与 primary 共享 stream/分数
-                score = primary_score.overall_score if primary_score else 0.0
-                passed = primary_score.overall_passed if primary_score else False
+                eval_score = primary_score or EvalScore(
+                    case_id=case_result.case.id, status="error",
+                    error="首次执行缺少评分", overall_passed=False,
+                )
+            elif not repeat.success or repeat.error:
+                eval_score = EvalScore(
+                    case_id=case_result.case.id, status="error",
+                    error=repeat.error or "请求未成功完成", overall_passed=False,
+                )
             else:
                 eval_score = await self._score_stream(
                     case_result.case, repeat.stream, judge_client
                 )
-                score = eval_score.overall_score
-                passed = eval_score.overall_passed
+            score = eval_score.overall_score
+            passed = eval_score.overall_passed
             repeat.overall_score = round(score, 4)
             repeat.overall_passed = passed
-            scores.append(score)
-            passes.append(passed)
-            evaluated.append((score, passed))
+            repeat.status = eval_score.status
+            outcomes.append(eval_score)
+            if eval_score.status in {"passed", "failed"}:
+                scores.append(score)
+                passes.append(passed)
 
         case_result.mean_score = round(mean(scores), 4) if scores else 0.0
         case_result.std_score = (
             round(stdev(scores), 4) if len(scores) >= 2 else 0.0
         )
         case_result.pass_rate = round(sum(passes) / max(len(passes), 1), 4)
-        case_result.flaky = len({p for _, p in evaluated}) > 1
+        case_result.flaky = len(set(passes)) > 1
+        # A later failure or unavailable trial must not disappear behind the
+        # first successful response. Business pass rate excludes unknown/error
+        # trials; their statuses remain explicit in the summary.
+        if primary_score and outcomes:
+            statuses = {outcome.status for outcome in outcomes}
+            aggregate = next(
+                status for status in ("failed", "error", "review", "passed")
+                if status in statuses
+            )
+            case_result.eval_score = primary_score.model_copy(update={
+                "status": aggregate,
+                "overall_passed": aggregate == "passed",
+                "overall_score": case_result.mean_score,
+            })
 
     def _compute_overall_score(self, dimensions: list[DimensionScore]) -> float:
         """按 config.eval.dimension_weights 计算综合得分。"""
@@ -160,6 +217,8 @@ class EvalPipeline:
         total = 0.0
         weight_sum = 0.0
         for d in dimensions:
+            if d.skipped:
+                continue
             w = weights.get(d.scorer.value, 0.1)
             normalized = d.score / d.max_score if d.max_score > 0 else 0
             total += normalized * w
@@ -177,12 +236,16 @@ class EvalPipeline:
         if not scores:
             return {}
 
-        overall_scores = [s.overall_score for s in scores]
-        avg_score = sum(overall_scores) / len(overall_scores)
-        passed = sum(1 for s in scores if s.overall_passed)
+        decided = [s for s in scores if s.status in {"passed", "failed"}]
+        overall_scores = [s.overall_score for s in decided]
+        avg_score = sum(overall_scores) / len(decided) if decided else 0.0
+        passed = sum(1 for s in decided if s.status == "passed")
+        failed = sum(1 for s in decided if s.status == "failed")
+        review = sum(1 for s in scores if s.status == "review")
+        errors = sum(1 for s in scores if s.status == "error")
 
         # Wilson 置信区间
-        _, pass_lower, pass_upper = wilson_interval(passed, len(scores))
+        _, pass_lower, pass_upper = wilson_interval(passed, len(decided))
 
         # Flaky 检测
         flaky_cases = [
@@ -196,6 +259,8 @@ class EvalPipeline:
         judge_low_conf = 0
         for s in scores:
             for d in s.dimensions:
+                if d.skipped:
+                    continue
                 if d.scorer == ScorerType.LLM_JUDGE:
                     judge_total += 1
                     if d.low_confidence:
@@ -207,6 +272,8 @@ class EvalPipeline:
         dimension_stats: dict[str, dict[str, float]] = {}
         for s in scores:
             for d in s.dimensions:
+                if d.skipped or d.needs_review:
+                    continue
                 key = d.scorer.value
                 if key not in dimension_stats:
                     dimension_stats[key] = {"total": 0, "count": 0, "avg": 0.0}
@@ -216,11 +283,23 @@ class EvalPipeline:
             stats["avg"] = round(stats["total"] / max(stats["count"], 1), 4)
 
         return {
+            "scoring_version": "evidence-v2",
             "eval_avg_score": round(avg_score, 4),
-            "eval_pass_rate": round(passed / len(scores), 4),
+            "eval_pass_rate": round(passed / len(decided), 4) if decided else 0.0,
             "eval_pass_rate_ci": [round(pass_lower, 4), round(pass_upper, 4)],
+            "eval_decided": len(decided),
             "eval_passed": passed,
-            "eval_failed": len(scores) - passed,
+            "eval_failed": failed,
+            "eval_review": review,
+            "eval_error": errors,
+            "eval_unresolved": review + errors,
+            "repeat_status_counts": {
+                status: sum(
+                    1 for cr in run_result.case_results for repeat in cr.repeats
+                    if repeat.status == status
+                )
+                for status in ("passed", "failed", "review", "error")
+            },
             "flaky_count": len(flaky_cases),
             "flaky_cases": flaky_cases,
             "judge_disagreement_rate": judge_disagreement_rate,

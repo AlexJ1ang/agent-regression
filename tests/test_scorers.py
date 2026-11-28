@@ -152,11 +152,32 @@ class TestFactScorer:
         )
         assert result.passed is True
 
-    def test_reference_number_coverage(self):
+    def test_reference_alone_requires_review(self):
         case = make_case(
             expectations=ExpectationSpec(reference_answer="工时 39.72 小时")
         )
         result = FactScorer().score(
             case, make_stream(answer_parts=["累计工时 39.72 小时"])
         )
-        assert result.passed is True
+        assert result.passed is False
+        assert result.skipped is True
+        assert result.needs_review is True
+
+    def test_swapped_entities_are_not_certified_by_number_coverage(self):
+        case = make_case(
+            expectations=ExpectationSpec(reference_answer="A=10, B=20")
+        )
+        result = FactScorer().score(
+            case, make_stream(answer_parts=["A=20, B=10"])
+        )
+        assert result.passed is False
+        assert result.needs_review is True
+
+    def test_keyword_failure_is_still_definite_with_reference(self):
+        case = make_case(expectations=ExpectationSpec(
+            reference_answer="设备 A 油耗 10 L", expected_keywords=["油耗"],
+        ))
+        result = FactScorer().score(case, make_stream(answer_parts=["工时 10 h"]))
+        assert result.passed is False
+        assert result.skipped is False
+        assert result.needs_review is True

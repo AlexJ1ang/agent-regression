@@ -7,7 +7,7 @@
 门禁规则：
 - ``min_score``       整体平均分下限
 - ``min_pass_rate``   通过率下限
-- ``max_regressions`` 允许的最大显著回归用例数（需 baseline 对比）
+- ``max_regressions`` 允许的最大回归用例数（包括明确失败，需 baseline 对比）
 """
 
 from __future__ import annotations
@@ -67,6 +67,20 @@ def evaluate_gate(
     avg_score = summary.get("eval_avg_score", 0.0)
     pass_rate = summary.get("eval_pass_rate", 0.0)
 
+    # New summaries distinguish a business verdict from unavailable evidence.
+    # Keep older integrations readable, but never certify unresolved new runs.
+    if "eval_unresolved" in summary:
+        unresolved = int(summary["eval_unresolved"])
+        decided = int(summary.get("eval_decided", 0))
+        complete = unresolved == 0 and decided > 0
+        checks.append(GateCheck(
+            name="quality_complete", passed=complete, threshold=0,
+            actual=unresolved,
+            detail=f"已判定 {decided} 条，待核验或执行异常 {unresolved} 条",
+        ))
+        if not complete:
+            violations.append("评测证据不完整或没有已判定用例，禁止放行")
+
     # ── 平均分下限 ──
     if rule.min_score is not None:
         passed = avg_score >= rule.min_score
@@ -100,16 +114,17 @@ def evaluate_gate(
     # ── 回归用例数上限（需 baseline 对比）──
     if rule.max_regressions is not None:
         if comparison is None or "error" in comparison:
-            # 无基线可对比，跳过该项（不判失败）
+            # Requested regression protection cannot be verified without a baseline.
             checks.append(
                 GateCheck(
                     name="max_regressions",
-                    passed=True,
+                    passed=False,
                     threshold=rule.max_regressions,
                     actual=None,
-                    detail="无基线可对比，跳过",
+                    detail="无有效基线，无法确认回归数",
                 )
             )
+            violations.append("缺少有效基线，不能验证回归数上限")
         else:
             reg_count = comparison.get("summary", {}).get(
                 "regression_count", len(comparison.get("regressions", []))
@@ -120,12 +135,12 @@ def evaluate_gate(
                 passed=passed,
                 threshold=rule.max_regressions,
                 actual=reg_count,
-                detail=f"显著回归 {reg_count} 例 / 上限 {rule.max_regressions}",
+                detail=f"回归 {reg_count} 例 / 上限 {rule.max_regressions}",
             )
             checks.append(check)
             if not passed:
                 violations.append(
-                    f"显著回归 {reg_count} 例超过上限 {rule.max_regressions}"
+                    f"回归 {reg_count} 例超过上限 {rule.max_regressions}"
                 )
 
     return GateResult(

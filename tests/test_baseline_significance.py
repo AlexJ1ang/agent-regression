@@ -135,9 +135,9 @@ def test_gate_counts_only_significant_regressions(tmp_path):
     assert result.passed is False
 
 
-def test_gate_skips_regression_without_baseline():
+def test_gate_refuses_requested_regression_check_without_baseline():
     summary = {"eval_avg_score": 0.9, "eval_pass_rate": 0.9}
     result = evaluate_gate(summary, None, GateRule(max_regressions=0))
     checks = {c.name: c for c in result.checks}
-    # 无基线可对比 → 跳过该项，不判失败
-    assert checks["max_regressions"].passed is True
+    assert checks["max_regressions"].passed is False
+    assert result.passed is False

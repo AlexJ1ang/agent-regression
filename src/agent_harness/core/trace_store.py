@@ -98,6 +98,8 @@ def _serialize_case(case_result: CaseResult) -> dict[str, Any]:
                 "latency_ms": r.latency_ms,
                 "answer_preview": r.answer_preview,
                 "error": r.error,
+                "status": r.status,
+                "stream": _serialize_stream(r.stream),
             }
             for r in case_result.repeats
         ],

@@ -73,11 +73,19 @@ def main() -> int:
         "--gate-min-pass-rate", type=float, default=None, help="门禁：通过率下限"
     )
     eval_parser.add_argument(
-        "--gate-max-regressions", type=int, default=None, help="门禁：允许的最大显著回归用例数"
+        "--gate-max-regressions", type=int, default=None, help="门禁：允许的最大回归用例数（包括明确失败）"
     )
     eval_parser.add_argument(
         "--baseline", type=str, default=None, help="对比基线名称（用于门禁/回归检测）"
     )
+
+    task_parser = subparsers.add_parser("task", help="执行固定多轮业务任务并检查工具参数与结果")
+    task_parser.add_argument("--suite", "-s", type=Path, required=True, help="任务文件")
+    task_parser.add_argument("--target", "-t", type=Path, required=True, help="HTTP JSON 接入配置")
+    task_parser.add_argument("--output", "-o", type=Path, required=True, help="结果目录")
+    task_mode = task_parser.add_mutually_exclusive_group()
+    task_mode.add_argument("--resume", action="store_true", help="跳过已完成任务，未完成任务重新开始")
+    task_mode.add_argument("--rejudge", action="store_true", help="仅重新检查已保存记录，不调用 Agent")
 
     # load 命令
     load_parser = subparsers.add_parser("load", help="执行性能压测")
@@ -193,6 +201,8 @@ def main() -> int:
     try:
         if args.command == "eval":
             return asyncio.run(_cmd_eval(args))
+        elif args.command == "task":
+            return asyncio.run(_cmd_task(args))
         elif args.command == "load":
             return asyncio.run(_cmd_load(args))
         elif args.command == "report":
@@ -213,6 +223,36 @@ def main() -> int:
     return 0
 
 
+async def _cmd_task(args: argparse.Namespace) -> int:
+    """Run tasks with one honest status per task and inspectable evidence."""
+    from collections import Counter
+
+    from agent_harness.tasks.adapters import HttpJsonAdapter, load_target
+    from agent_harness.tasks.loader import load_task_suite
+    from agent_harness.tasks.models import TaskRun
+    from agent_harness.tasks.report import render_report
+    from agent_harness.tasks.runner import rejudge, run_suite, save_run
+
+    suite = load_task_suite(args.suite)
+    target = load_target(args.target)
+    if args.rejudge:
+        saved = TaskRun.model_validate_json((args.output / "run.json").read_text(encoding="utf-8"))
+        result = rejudge(suite, saved, target_identity=target.identity())
+        save_run(result, args.output)
+    else:
+        async with HttpJsonAdapter(target) as adapter:
+            result = await run_suite(
+                suite, adapter, args.output, target_identity=target.identity(), resume=args.resume,
+            )
+    report_path = render_report(result, args.output)
+    counts = Counter(task.status for task in result.results)
+    print("任务结果: " + ", ".join(f"{name}={counts[name]}" for name in (
+        "passed", "failed", "review", "error", "invalid",
+    )))
+    print(f"报告: {report_path}")
+    return 0 if result.results and all(task.status == "passed" for task in result.results) else 1
+
+
 async def _cmd_eval(args: argparse.Namespace) -> int:
     """执行功能评测。"""
     logger.info("加载配置: %s", args.config)
@@ -225,6 +265,8 @@ async def _cmd_eval(args: argparse.Namespace) -> int:
 
     logger.info("加载用例集: %s", args.suite)
     suite = load_suite(args.suite)
+    if not suite.cases:
+        raise ValueError("测试集为空，无法执行评测")
     logger.info("共 %d 条用例", len(suite.cases))
 
     # 执行
@@ -253,6 +295,7 @@ async def _cmd_eval(args: argparse.Namespace) -> int:
     print(f"\n{'='*50}")
     print(f"评测结果: {summary.get('eval_passed', 0)}/{summary.get('total', 0)} 通过")
     print(f"通过率: {summary.get('eval_pass_rate', 0):.1%}")
+    print(f"判定口径: 通过 / (通过 + 失败)；待核验 {summary.get('eval_review', 0)}，执行异常 {summary.get('eval_error', 0)}")
     print(f"平均分: {summary.get('eval_avg_score', 0):.2f}")
     print(f"{'='*50}\n")
 

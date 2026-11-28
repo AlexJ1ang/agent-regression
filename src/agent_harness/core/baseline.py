@@ -8,8 +8,7 @@
 - ``no_significant_change``     无显著变化
 - ``significant_regression``    显著回归（p < 0.05 且方向为负）
 
-只有 ``significant_regression`` 才会计入 ``--gate-max-regressions``，
-从而过滤掉随机噪声导致的假回归。
+明确的通过→失败始终计入门禁；连续分数的变化另报告统计显著性。
 """
 
 from __future__ import annotations
@@ -83,8 +82,21 @@ class BaselineStore:
         if baseline is None:
             return {"error": f"baseline '{baseline_name}' not found"}
 
+        scoring_version = current.summary.get("scoring_version")
+        if scoring_version is not None and baseline.get("summary", {}).get("scoring_version") != scoring_version:
+            return {"error": "scoring policy changed; rerun and review a new baseline before comparison"}
+
         current_scores = self._extract_scores(current)
         baseline_scores = self._extract_scores_from_dict(baseline)
+        current_statuses = {
+            cr.case.id: cr.eval_score.status
+            for cr in current.case_results if cr.eval_score is not None
+        }
+        baseline_statuses = baseline.get("statuses", {})
+        unresolved_cases = [
+            cid for cid, status in current_statuses.items()
+            if status in {"review", "error"}
+        ]
         # 重复采样分布（用于 per-case 显著性检验）
         current_dist = self._extract_repeat_distributions(current)
         baseline_dist = self._extract_repeat_distributions_from_dict(baseline)
@@ -99,14 +111,20 @@ class BaselineStore:
         c_pairs: list[int] = []  # baseline fail -> current pass
         paired_current: list[float] = []
         paired_baseline: list[float] = []
+        current_pass_total = 0
+        base_pass_total = 0
 
         for case_id, current_score in current_scores.items():
             if case_id not in baseline_scores:
                 new_cases.append(case_id)
                 continue
             base_score = baseline_scores[case_id]
-            base_passed = base_score >= 0.5  # 阈值判断
-            current_passed = current_score >= 0.5
+            # Older baseline files only contain scores; new ones retain the
+            # actual verdict so a failed required check cannot hide in a high mean.
+            base_passed = baseline_statuses.get(case_id, "passed" if base_score >= 0.5 else "failed") == "passed"
+            current_passed = current_statuses.get(case_id) == "passed"
+            current_pass_total += current_passed
+            base_pass_total += base_passed
 
             if base_passed and not current_passed:
                 b_pairs.append(1)
@@ -122,6 +140,7 @@ class BaselineStore:
                 "baseline_score": round(base_score, 4),
                 "current_score": round(current_score, 4),
                 "delta": round(delta, 4),
+                "hard_failure": base_passed and not current_passed,
             }
 
             # per-case 显著性检验：双方都存在重复采样分布（≥2 个样本）时可做
@@ -135,13 +154,13 @@ class BaselineStore:
                 entry["p_value"] = None
                 entry["significance"] = None
 
-            if delta < -DELTA_EPS:
+            if delta < -DELTA_EPS or entry["hard_failure"]:
                 regressions.append(entry)
             elif delta > DELTA_EPS:
                 improvements.append(entry)
 
         for case_id in baseline_scores:
-            if case_id not in current_scores:
+            if case_id not in current_scores and case_id not in unresolved_cases:
                 removed_cases.append(case_id)
 
         # ── aggregate 统计显著性检验 ──
@@ -156,11 +175,9 @@ class BaselineStore:
         overall_verdict = _significance_verdict(t_p, overall_direction)
 
         # Wilson 区间
-        current_pass = sum(1 for s in paired_current if s >= 0.5)
         total = len(paired_current) if paired_current else 1
-        _, curr_lower, curr_upper = wilson_interval(current_pass, total)
-        base_pass = sum(1 for s in paired_baseline if s >= 0.5)
-        _, base_lower, base_upper = wilson_interval(base_pass, total)
+        _, curr_lower, curr_upper = wilson_interval(current_pass_total, total)
+        _, base_lower, base_upper = wilson_interval(base_pass_total, total)
 
         avg_current = sum(paired_current) / max(len(paired_current), 1)
         avg_baseline = sum(paired_baseline) / max(len(paired_baseline), 1)
@@ -177,14 +194,17 @@ class BaselineStore:
                 for r in regressions
                 if r.get("significance") == "significant_regression"
             ]
-            regression_count = len(sig_regressions)
+            counted_cases = {r["case_id"] for r in sig_regressions}
         else:
             # 单次采样：仅当整体结论为显著回归时才把方向性回归计入
-            regression_count = (
-                len(regressions)
+            counted_cases = (
+                {r["case_id"] for r in regressions}
                 if overall_verdict == "significant_regression"
-                else 0
+                else set()
             )
+        hard_regressions = [r for r in regressions if r["hard_failure"]]
+        counted_cases.update(r["case_id"] for r in hard_regressions)
+        regression_count = len(counted_cases)
 
         return {
             "baseline_name": baseline_name,
@@ -209,9 +229,12 @@ class BaselineStore:
             "improvements": improvements,
             "new_cases": new_cases,
             "removed_cases": removed_cases,
+            "unresolved_cases": unresolved_cases,
             "summary": {
                 "total_compared": len(paired_current),
                 "regression_count": regression_count,
+                "hard_regression_count": len(hard_regressions),
+                "unresolved_count": len(unresolved_cases),
                 "improvement_count": len(improvements),
                 "new_count": len(new_cases),
                 "removed_count": len(removed_cases),
@@ -228,15 +251,19 @@ class BaselineStore:
         """
         scores: dict[str, float] = {}
         repeat_scores: dict[str, list[float]] = {}
+        statuses: dict[str, str | None] = {}
         for cr in run_result.case_results:
             if cr.eval_score:
+                statuses[cr.case.id] = cr.eval_score.status
+            if cr.eval_score and cr.eval_score.status in {"passed", "failed"}:
                 scores[cr.case.id] = cr.eval_score.overall_score
             # 重复采样分布：优先取 repeats 的分数；无 repeats 则退化为单一代表分
             if cr.repeats and any(r.overall_score is not None for r in cr.repeats):
                 repeat_scores[cr.case.id] = [
                     r.overall_score for r in cr.repeats
+                    if r.status in {None, "passed", "failed"}
                 ]
-            elif cr.eval_score is not None:
+            elif cr.eval_score is not None and cr.eval_score.status in {"passed", "failed"}:
                 repeat_scores[cr.case.id] = [cr.eval_score.overall_score]
         return {
             "run_id": run_result.run_id,
@@ -244,6 +271,7 @@ class BaselineStore:
             "started_at": run_result.started_at,
             "completed_at": run_result.completed_at,
             "scores": scores,
+            "statuses": statuses,
             "repeat_scores": repeat_scores,
             "summary": run_result.summary,
         }
@@ -252,7 +280,7 @@ class BaselineStore:
     def _extract_scores(run_result: RunResult) -> dict[str, float]:
         scores: dict[str, float] = {}
         for cr in run_result.case_results:
-            if cr.eval_score:
+            if cr.eval_score and cr.eval_score.status in {"passed", "failed"}:
                 scores[cr.case.id] = cr.eval_score.overall_score
         return scores
 
@@ -262,10 +290,10 @@ class BaselineStore:
     ) -> dict[str, list[float]]:
         dist: dict[str, list[float]] = {}
         for cr in run_result.case_results:
-            vals = [r.overall_score for r in cr.repeats]
+            vals = [r.overall_score for r in cr.repeats if r.status in {None, "passed", "failed"}]
             # 过滤 None，避免重复采样未评分阶段残留
             vals = [v for v in vals if v is not None]
-            if not vals and cr.eval_score is not None:
+            if not vals and cr.eval_score is not None and cr.eval_score.status in {"passed", "failed"}:
                 vals = [cr.eval_score.overall_score]
             if vals:
                 dist[cr.case.id] = vals

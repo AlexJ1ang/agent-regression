@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import time
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── 测试用例 ──────────────────────────────────────────────────
 
@@ -157,6 +157,11 @@ class DimensionScore(BaseModel):
     # Judge 自一致性校验失败标记（分数仍记录，仅供报告聚合分歧率）
     # 仅对 LLM_JUDGE 维度有意义，其余维度恒为 False
     low_confidence: bool = False
+    # A reference or unavailable evidence cannot be certified by this checker.
+    needs_review: bool = False
+
+
+EvalStatus = Literal["passed", "failed", "review", "error"]
 
 
 class EvalScore(BaseModel):
@@ -168,6 +173,15 @@ class EvalScore(BaseModel):
     overall_passed: bool = True
     latency: LatencyMetrics | None = None
     error: str = ""
+    status: EvalStatus | None = None
+
+    @model_validator(mode="after")
+    def resolve_status(self) -> EvalScore:
+        """Keep existing serialized results readable while adding explicit outcomes."""
+        if self.status is None:
+            self.status = "passed" if self.overall_passed else "failed"
+        self.overall_passed = self.status == "passed"
+        return self
 
 
 # ── 执行结果 ──────────────────────────────────────────────────
@@ -184,6 +198,7 @@ class RepeatResult(BaseModel):
     latency_ms: float | None = None
     answer_preview: str = ""
     error: str = ""
+    status: EvalStatus | None = None
 
 
 class CaseResult(BaseModel):
